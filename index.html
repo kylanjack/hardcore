@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<!--
+  HARDCORE — Minecraft hardcore run tracker
+  One death ends it all.
+
+  STORAGE MODES
+  =============
+  LOCAL (default): runs entirely on localStorage. No setup. Data lives in
+  this browser on this device only.
+
+  CLOUD: paste your Supabase project URL and anon key into CONFIG below
+  (same two values your Soul Link tracker uses — same project, new table),
+  then run this SQL once in that project's SQL Editor:
+
+    create table hc_runs (
+      id uuid primary key,
+      attempt_number int not null,
+      mc_day int default 1,
+      play_ms bigint default 0,
+      session_started_at timestamptz,
+      started_at timestamptz,
+      ended_at timestamptz,
+      status text default 'active',
+      death_player text,
+      death_cause text,
+      death_note text,
+      players jsonb default '[]',
+      milestones jsonb default '[]'
+    );
+    alter table hc_runs enable row level security;
+    create policy "public read"   on hc_runs for select using (true);
+    create policy "public write"  on hc_runs for insert with check (true);
+    create policy "public update" on hc_runs for update using (true) with check (true);
+
+  Already created the table from an older version of this file? Run this instead:
+
+    alter table hc_runs add column if not exists mc_day int default 1;
+    alter table hc_runs add column if not exists play_ms bigint default 0;
+    alter table hc_runs add column if not exists session_started_at timestamptz;
+
+  On first load in cloud mode, if the cloud table is empty and this browser
+  has local history, the app offers to migrate it up automatically.
+
+  TIME TRACKING
+  =============
+  PLAYTIME: tap START SESSION when you boot the game, END SESSION when you
+  quit. Only session time counts. Tap the total to correct it manually.
+  MC DAY: manual counter (a browser can't read the game). Sync it with
+  /time query day on the server, or bump it with the +/- buttons.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#141109">
+<title>HARDCORE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#141109;
+    --panel:#2b2115;
+    --panel2:#352a1b;
+    --bevel-l:#5a472f;
+    --bevel-d:#0a0805;
+    --text:#f2ead9;
+    --muted:#a4927a;
+    --green:#72c234;
+    --green-dk:#3f7a17;
+    --red:#e23b3b;
+    --red-dk:#5a1512;
+    --gold:#fcdc5f;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;border-radius:0!important;-webkit-tap-highlight-color:transparent}
+  body{
+    background:var(--bg);
+    background-image:
+      repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0 4px, transparent 4px 8px),
+      repeating-linear-gradient(90deg, rgba(255,255,255,.012) 0 4px, transparent 4px 8px);
+    color:var(--text);
+    font-family:'VT323',monospace;
+    font-size:19px;
+    min-height:100vh;
+    padding-bottom:120px;
+  }
+  .wrap{max-width:660px;margin:0 auto;padding:0 14px;position:relative;z-index:1}
+
+  /* grass block ground strip (inline SVG tile, no external assets) */
+  .ground{
+    position:fixed;left:0;right:0;bottom:0;height:48px;z-index:0;
+    pointer-events:none;
+    background-repeat:repeat-x;
+    background-size:48px 48px;
+    image-rendering:pixelated;
+  }
+
+  /* scenic decor layer: sky, floating blocks, mobs on the ground */
+  .decor{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+  .decor .d{position:absolute}
+  .decor .d svg{width:100%;height:100%;display:block}
+  .decor .star{position:absolute;background:#f2ead9;width:3px;height:3px}
+
+  .px{font-family:'Press Start 2P',monospace;line-height:1.3}
+
+  .panel{
+    background:var(--panel);
+    border:3px solid;
+    border-color:var(--bevel-l) var(--bevel-d) var(--bevel-d) var(--bevel-l);
+  }
+  .btn{
+    background:var(--panel2);
+    border:3px solid;
+    border-color:var(--bevel-l) var(--bevel-d) var(--bevel-d) var(--bevel-l);
+    color:var(--text);
+    font-family:'VT323',monospace;
+    font-size:19px;
+    cursor:pointer;
+  }
+  .btn:active{
+    border-color:var(--bevel-d) var(--bevel-l) var(--bevel-l) var(--bevel-d);
+    transform:translate(1px,1px);
+  }
+
+  header{padding:26px 0 8px;text-align:center}
+  .title{
+    font-size:clamp(26px,7.5vw,40px);
+    color:var(--red);
+    text-shadow:4px 4px 0 #000;
+    letter-spacing:1px;
+  }
+  .tag{color:var(--muted);margin-top:10px;display:flex;align-items:center;justify-content:center;gap:12px}
+  .mode{border:2px solid var(--muted);padding:0 8px;font-size:16px;color:var(--muted)}
+  .mode.cloud{color:var(--green);border-color:var(--green)}
+
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}
+  .stat{padding:14px 8px;text-align:center}
+  .stat .v{font-size:clamp(16px,4.5vw,22px);color:var(--gold);text-shadow:2px 2px 0 #000}
+  .stat .k{color:var(--muted);margin-top:8px;font-size:17px}
+
+  .hearts{display:flex;gap:4px;justify-content:center;margin-bottom:14px}
+  .hearts svg{width:22px;height:22px}
+  @keyframes beat{0%,100%{transform:scale(1)}20%{transform:scale(1.2)}}
+  .beat{animation:beat 1.4s ease-in-out infinite;transform-origin:center}
+  @media (prefers-reduced-motion:reduce){.beat{animation:none}}
+
+  .run{padding:18px;margin-bottom:26px}
+  .run-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+  .attempt{font-size:clamp(20px,6vw,30px);text-shadow:3px 3px 0 #000}
+  .attempt small{display:block;font-size:11px;color:var(--muted);margin-bottom:8px;text-shadow:none}
+  .alive{color:var(--green);text-align:right;font-size:20px}
+  .alive .since{display:block;color:var(--muted);font-size:16px;margin-top:2px}
+
+  /* playtime + mc day rows */
+  .trk{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    background:var(--panel2);
+    border:3px solid;border-color:var(--bevel-d) var(--bevel-l) var(--bevel-l) var(--bevel-d);
+    padding:10px 12px;margin-top:14px;flex-wrap:wrap;
+  }
+  .trk .lbl{color:var(--muted);font-size:18px}
+  .trk .ctr{display:flex;align-items:center;gap:8px}
+  .trk .num{
+    font-size:clamp(14px,4.5vw,20px);color:var(--gold);text-shadow:2px 2px 0 #000;
+    min-width:70px;text-align:center;cursor:pointer;
+  }
+  .trk .btn{min-width:44px;height:40px;font-size:24px;line-height:1}
+  .sess-btn{font-size:17px!important;padding:0 14px}
+  .sess-btn.live{
+    background:var(--green-dk);color:#dff5c8;
+    border-color:var(--green) var(--bevel-d) var(--bevel-d) var(--green);
+  }
+  .live-time{color:var(--green);font-size:clamp(14px,4.5vw,20px);text-shadow:2px 2px 0 #000;min-width:92px;text-align:center}
+
+  .players{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+  .chip{background:var(--panel2);border:2px solid var(--bevel-d);padding:3px 12px;font-size:18px}
+
+  .ms-head{color:var(--muted);margin-bottom:8px;display:flex;justify-content:space-between;font-size:18px}
+  .ms-row{display:flex;gap:6px;margin-bottom:6px}
+  .ms-btn{flex:1;display:flex;align-items:center;gap:10px;padding:9px 12px;text-align:left}
+  .ms-btn .box{
+    width:18px;height:18px;flex-shrink:0;
+    background:var(--bg);
+    border:2px solid;border-color:var(--bevel-d) var(--bevel-l) var(--bevel-l) var(--bevel-d);
+    color:var(--green);font-size:17px;line-height:14px;text-align:center;font-weight:bold;
+  }
+  .ms-btn.done{color:var(--muted);text-decoration:line-through}
+  .ms-x{width:42px;color:var(--muted);font-size:20px}
+  .ms-add{display:flex;gap:6px;margin-top:10px}
+  input{
+    background:var(--bg);
+    border:3px solid;border-color:var(--bevel-d) var(--bevel-l) var(--bevel-l) var(--bevel-d);
+    color:var(--text);font-family:'VT323',monospace;font-size:19px;
+    padding:8px 12px;outline:none;
+  }
+  input:focus{border-color:var(--green)}
+  .ms-add input{flex:1}
+  .ms-add .btn{padding:0 18px}
+
+  .die{
+    width:100%;margin-top:20px;padding:12px 14px;
+    display:flex;align-items:center;justify-content:center;gap:12px;
+    background:var(--red-dk);
+    border:3px solid;border-color:var(--red) var(--bevel-d) var(--bevel-d) var(--red);
+    color:var(--red);font-family:'Press Start 2P',monospace;font-size:15px;
+    cursor:pointer;text-shadow:2px 2px 0 #000;
+  }
+  .die svg{width:26px;height:26px;flex-shrink:0}
+  .die:active{background:var(--red);color:var(--bg);text-shadow:none}
+
+  .death-form{margin-top:20px;border-top:3px solid var(--bevel-d);padding-top:16px}
+  .df-label{color:var(--muted);margin-bottom:8px;font-size:18px}
+  .df-players{display:flex;gap:8px;margin-bottom:14px}
+  .df-players .btn{flex:1;padding:11px 0}
+  .df-players .btn.sel{background:var(--red);color:var(--bg);border-color:var(--red-dk) var(--bevel-d) var(--bevel-d) var(--red-dk)}
+  .death-form input{width:100%;margin-bottom:10px}
+  .df-actions{display:flex;gap:8px;margin-top:6px}
+  .df-confirm{
+    flex:2;padding:13px;cursor:pointer;
+    background:var(--red);border:3px solid;border-color:var(--red-dk) var(--bevel-d) var(--bevel-d) var(--red-dk);
+    color:var(--bg);font-family:'Press Start 2P',monospace;font-size:13px;
+  }
+  .df-confirm:disabled{opacity:.35;cursor:default}
+  .df-cancel{flex:1;color:var(--muted)}
+
+  .gy-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .gy-title{font-size:clamp(16px,5vw,22px);color:var(--muted);text-shadow:2px 2px 0 #000}
+  .mobs{display:flex;gap:8px}
+  .mobs svg{width:26px;height:26px}
+  .grave{padding:14px 16px;margin-bottom:10px}
+  .grave-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .grave-attempt{font-size:14px;text-shadow:2px 2px 0 #000}
+  .grave-meta{color:var(--muted);font-size:17px}
+  .grave-death{margin-top:10px;font-size:20px}
+  .grave-death b{color:var(--red)}
+  .grave-words{color:var(--muted);font-style:italic;margin-top:2px}
+  .grave-prog{margin-top:10px}
+  .xpbar{
+    height:10px;background:var(--bg);
+    border:2px solid;border-color:var(--bevel-d) var(--bevel-l) var(--bevel-l) var(--bevel-d);
+    overflow:hidden;
+  }
+  .xpbar div{
+    height:100%;background:var(--green);
+    background-image:repeating-linear-gradient(90deg, var(--green) 0 8px, var(--green-dk) 8px 10px);
+  }
+  .grave-prog span{color:var(--muted);font-size:16px}
+  .gy-empty{color:var(--muted);padding:6px 2px}
+
+  footer{margin-top:30px;padding-top:16px;display:flex;gap:8px}
+  footer .btn{font-size:16px;padding:6px 12px;color:var(--muted)}
+  .err,.warn{padding:10px 12px;margin:12px 0;display:none;border:3px solid}
+  .err{background:var(--red-dk);border-color:var(--red);color:var(--red)}
+  .warn{background:#3a3012;border-color:var(--gold);color:var(--gold)}
+</style>
+</head>
+<body>
+<div class="ground" id="ground"></div>
+<div class="decor" id="decor"></div>
+<div class="wrap">
+  <header>
+    <div class="title px">HARDCORE</div>
+    <div class="tag">one death ends it all <span class="mode" id="modeBadge">LOCAL</span></div>
+  </header>
+
+  <div class="err" id="errBox"></div>
+  <div class="warn" id="warnBox"></div>
+
+  <div class="stats">
+    <div class="stat panel"><div class="v px" id="stAttempts">-</div><div class="k">attempts</div></div>
+    <div class="stat panel"><div class="v px" id="stLongest">-</div><div class="k">deepest mc day</div></div>
+    <div class="stat panel"><div class="v px" id="stBest">-</div><div class="k">best progress</div></div>
+  </div>
+
+  <div id="currentRun"></div>
+
+  <div class="gy-head">
+    <div class="gy-title px">GRAVEYARD</div>
+    <div class="mobs" id="mobRow"></div>
+  </div>
+  <div id="graveyard"></div>
+
+  <footer>
+    <button class="btn" onclick="exportData()">EXPORT JSON</button>
+    <button class="btn" onclick="importData()" id="importBtn">IMPORT</button>
+    <input type="file" id="importFile" accept=".json" style="display:none">
+  </footer>
+</div>
+
+<script>
+/* ============ CONFIG — paste Supabase creds here to go cloud ============ */
+const CONFIG = {
+  url: "https://twfrvoelwdizseunrrzj.supabase.co",
+  key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3ZnJ2b2Vsd2RpenNldW5ycnpqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIxOTczMzQsImV4cCI6MjEwNzc3MzMzNH0.FbAIBGPBmI0bvVSqQYMlAnSAKhneMvaFHhzMmtPBS9k"
+};
+/* ======================================================================== */
+
+const PLAYERS = ["Kylan","Raiden","Ethan"];
+const DEFAULT_MILESTONES = ["Full Iron","Diamonds","Nether","Blaze Rods","Eyes of Ender","Stronghold","The End","Dragon Slain"];
+const LS_KEY = "hardcore_runs_v1";
+const CLOUD = !!(CONFIG.url && CONFIG.key);
+
+let runs = [];
+let deathMode = false;
+let deathPlayer = null;
+let saveTimer = null;
+
+/* ---------- pixel art (all inline SVG, no external assets) ---------- */
+function heartSVG(cls) {
+  return `<svg class="${cls||""}" viewBox="0 0 7 7" shape-rendering="crispEdges" aria-hidden="true">
+    <g fill="#e23b3b">
+      <rect x="1" y="0" width="2" height="1"/><rect x="4" y="0" width="2" height="1"/>
+      <rect x="0" y="1" width="7" height="3"/>
+      <rect x="1" y="4" width="5" height="1"/>
+      <rect x="2" y="5" width="3" height="1"/>
+      <rect x="3" y="6" width="1" height="1"/>
+    </g>
+    <rect x="1" y="1" width="1" height="1" fill="#f2ead9"/>
+    <rect x="5" y="1" width="1" height="1" fill="#f2ead9"/>
+  </svg>`;
+}
+
+function creeperSVG() {
+  return `<svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="8" height="8" fill="#5fbf4a"/>
+    <g fill="#141109">
+      <rect x="1" y="2" width="2" height="2"/><rect x="5" y="2" width="2" height="2"/>
+      <rect x="3" y="4" width="2" height="2"/>
+      <rect x="2" y="5" width="4" height="2"/>
+      <rect x="2" y="7" width="1" height="1"/><rect x="5" y="7" width="1" height="1"/>
+    </g>
+  </svg>`;
+}
+
+function zombieSVG() {
+  return `<svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="8" height="8" fill="#44a93d"/>
+    <rect y="0" width="8" height="2" fill="#2e7d2a"/>
+    <g fill="#141109">
+      <rect x="1" y="3" width="2" height="1"/><rect x="5" y="3" width="2" height="1"/>
+      <rect x="3" y="5" width="2" height="2"/>
+    </g>
+  </svg>`;
+}
+
+function skeletonSVG() {
+  return `<svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="8" height="8" fill="#c6c6c6"/>
+    <rect y="0" width="8" height="1" fill="#9a9a9a"/>
+    <g fill="#141109">
+      <rect x="1" y="3" width="2" height="1"/><rect x="5" y="3" width="2" height="1"/>
+      <rect x="3" y="4" width="2" height="1"/>
+      <rect x="1" y="6" width="6" height="1"/>
+    </g>
+  </svg>`;
+}
+
+// grass block tile for the ground strip
+const GRASS_TILE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+  <rect width="16" height="16" fill="#79553a"/>
+  <rect x="2" y="8" width="2" height="2" fill="#5d3f2a"/>
+  <rect x="9" y="11" width="2" height="2" fill="#5d3f2a"/>
+  <rect x="13" y="7" width="2" height="2" fill="#8a6345"/>
+  <rect x="5" y="13" width="2" height="2" fill="#8a6345"/>
+  <rect x="0" y="0" width="16" height="4" fill="#5fab38"/>
+  <rect x="1" y="4" width="2" height="1" fill="#5fab38"/>
+  <rect x="6" y="4" width="3" height="1" fill="#5fab38"/>
+  <rect x="12" y="4" width="2" height="1" fill="#5fab38"/>
+  <rect x="3" y="1" width="2" height="1" fill="#6fbf44"/>
+  <rect x="10" y="2" width="2" height="1" fill="#6fbf44"/>
+  <rect x="7" y="0" width="1" height="1" fill="#6fbf44"/>
+</svg>`;
+document.getElementById("ground").style.backgroundImage =
+  "url('data:image/svg+xml," + encodeURIComponent(GRASS_TILE) + "')";
+document.getElementById("mobRow").innerHTML = creeperSVG() + zombieSVG() + skeletonSVG();
+
+/* ---------- scenic decor: blocks, full-body mobs, night sky ---------- */
+function blockSVG(kind) {
+  const open = `<svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">`;
+  if (kind === "dirt") return open + `
+    <rect width="8" height="8" fill="#79553a"/>
+    <rect x="1" y="1" width="2" height="1" fill="#5d3f2a"/>
+    <rect x="5" y="2" width="1" height="1" fill="#8a6345"/>
+    <rect x="3" y="4" width="2" height="1" fill="#5d3f2a"/>
+    <rect x="6" y="5" width="1" height="1" fill="#5d3f2a"/>
+    <rect x="1" y="6" width="2" height="1" fill="#8a6345"/></svg>`;
+  if (kind === "stone") return open + `
+    <rect width="8" height="8" fill="#7f7f7f"/>
+    <rect x="0" y="1" width="3" height="2" fill="#6b6b6b"/>
+    <rect x="5" y="0" width="2" height="2" fill="#6b6b6b"/>
+    <rect x="2" y="4" width="3" height="2" fill="#6b6b6b"/>
+    <rect x="6" y="5" width="2" height="2" fill="#6b6b6b"/>
+    <rect x="4" y="2" width="2" height="1" fill="#9a9a9a"/>
+    <rect x="0" y="5" width="2" height="1" fill="#9a9a9a"/></svg>`;
+  if (kind === "ore" || kind === "gold" || kind === "redstone") {
+    const c = kind === "gold" ? "#fcdc5f" : kind === "redstone" ? "#e23b3b" : "#4aedd9";
+    return open + `
+    <rect width="8" height="8" fill="#7f7f7f"/>
+    <rect x="0" y="0" width="2" height="2" fill="#6b6b6b"/>
+    <rect x="5" y="6" width="2" height="1" fill="#6b6b6b"/>
+    <g fill="${c}">
+      <rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/>
+      <rect x="3" y="2" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/>
+      <rect x="5" y="4" width="1" height="1"/><rect x="4" y="5" width="1" height="1"/>
+      <rect x="6" y="5" width="1" height="1"/><rect x="5" y="6" width="1" height="1"/>
+    </g></svg>`;
+  }
+  if (kind === "obsidian") return open + `
+    <rect width="8" height="8" fill="#1a1026"/>
+    <rect x="1" y="1" width="2" height="1" fill="#3a2a5a"/>
+    <rect x="5" y="2" width="1" height="2" fill="#3a2a5a"/>
+    <rect x="2" y="5" width="1" height="1" fill="#2a1d42"/>
+    <rect x="5" y="6" width="2" height="1" fill="#3a2a5a"/>
+    <rect x="0" y="4" width="1" height="1" fill="#2a1d42"/></svg>`;
+  if (kind === "log") return open + `
+    <rect width="8" height="8" fill="#6b4a2a"/>
+    <rect x="1" y="0" width="1" height="8" fill="#533920"/>
+    <rect x="4" y="0" width="1" height="8" fill="#533920"/>
+    <rect x="6" y="0" width="1" height="8" fill="#7d5a36"/>
+    <rect x="2" y="0" width="1" height="8" fill="#7d5a36"/></svg>`;
+  if (kind === "grass") return open + `
+    <rect width="8" height="8" fill="#79553a"/>
+    <rect x="2" y="5" width="2" height="1" fill="#5d3f2a"/>
+    <rect x="5" y="6" width="1" height="1" fill="#8a6345"/>
+    <rect x="0" y="0" width="8" height="2" fill="#5fab38"/>
+    <rect x="0" y="2" width="2" height="1" fill="#5fab38"/>
+    <rect x="4" y="2" width="2" height="1" fill="#5fab38"/>
+    <rect x="1" y="0" width="2" height="1" fill="#6fbf44"/>
+    <rect x="6" y="1" width="1" height="1" fill="#6fbf44"/></svg>`;
+  // tnt
+  return open + `
+    <rect width="8" height="8" fill="#db441a"/>
+    <rect x="1" y="1" width="1" height="1" fill="#a32e0e"/>
+    <rect x="5" y="6" width="2" height="1" fill="#a32e0e"/>
+    <rect x="0" y="3" width="8" height="2" fill="#e8e8e8"/>
+    <rect x="1" y="3" width="1" height="2" fill="#2b2115"/>
+    <rect x="3" y="3" width="1" height="2" fill="#2b2115"/>
+    <rect x="5" y="3" width="2" height="1" fill="#2b2115"/></svg>`;
+}
+
+function moonSVG() {
+  return `<svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="8" height="8" fill="#e8e4c9"/>
+    <rect x="2" y="2" width="2" height="2" fill="#c9c4a4"/>
+    <rect x="5" y="1" width="1" height="1" fill="#c9c4a4"/>
+    <rect x="5" y="5" width="2" height="1" fill="#c9c4a4"/>
+    <rect x="1" y="5" width="1" height="1" fill="#c9c4a4"/></svg>`;
+}
+
+function creeperBodySVG() {
+  return `<svg viewBox="0 0 8 17" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="8" height="8" fill="#5fbf4a"/>
+    <g fill="#141109">
+      <rect x="1" y="2" width="2" height="2"/><rect x="5" y="2" width="2" height="2"/>
+      <rect x="3" y="4" width="2" height="2"/>
+      <rect x="2" y="5" width="4" height="2"/>
+      <rect x="2" y="7" width="1" height="1"/><rect x="5" y="7" width="1" height="1"/>
+    </g>
+    <rect x="2" y="8" width="4" height="5" fill="#4ea63c"/>
+    <rect x="3" y="9" width="1" height="1" fill="#3d8a2e"/>
+    <rect x="1" y="13" width="2" height="3" fill="#4ea63c"/>
+    <rect x="5" y="13" width="2" height="3" fill="#4ea63c"/></svg>`;
+}
+
+function zombieBodySVG() {
+  return `<svg viewBox="0 0 8 18" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="8" height="8" fill="#44a93d"/>
+    <rect y="0" width="8" height="2" fill="#2e7d2a"/>
+    <g fill="#141109">
+      <rect x="1" y="3" width="2" height="1"/><rect x="5" y="3" width="2" height="1"/>
+      <rect x="3" y="5" width="2" height="2"/>
+    </g>
+    <rect x="2" y="8" width="4" height="6" fill="#1f8b8b"/>
+    <rect x="3" y="10" width="2" height="1" fill="#166a6a"/>
+    <rect x="0" y="8" width="2" height="5" fill="#44a93d"/>
+    <rect x="6" y="8" width="2" height="5" fill="#44a93d"/>
+    <rect x="2" y="14" width="2" height="4" fill="#35356b"/>
+    <rect x="4" y="14" width="2" height="4" fill="#2a2a55"/></svg>`;
+}
+
+function skeletonBodySVG() {
+  return `<svg viewBox="0 0 8 18" shape-rendering="crispEdges" aria-hidden="true">
+    <rect width="8" height="8" fill="#c6c6c6"/>
+    <rect y="0" width="8" height="1" fill="#9a9a9a"/>
+    <g fill="#141109">
+      <rect x="1" y="3" width="2" height="1"/><rect x="5" y="3" width="2" height="1"/>
+      <rect x="3" y="4" width="2" height="1"/>
+      <rect x="1" y="6" width="6" height="1"/>
+    </g>
+    <rect x="2" y="8" width="4" height="5" fill="#b0b0b0"/>
+    <rect x="2" y="9" width="4" height="1" fill="#8a8a8a"/>
+    <rect x="2" y="11" width="4" height="1" fill="#8a8a8a"/>
+    <rect x="0" y="8" width="1" height="5" fill="#b0b0b0"/>
+    <rect x="7" y="8" width="1" height="5" fill="#b0b0b0"/>
+    <rect x="2" y="13" width="1" height="5" fill="#b0b0b0"/>
+    <rect x="5" y="13" width="1" height="5" fill="#b0b0b0"/></svg>`;
+}
+
+function endermanSVG() {
+  return `<svg viewBox="0 0 8 24" shape-rendering="crispEdges" aria-hidden="true">
+    <rect x="1" y="0" width="6" height="5" fill="#161616"/>
+    <rect x="1" y="2" width="2" height="1" fill="#e079fa"/>
+    <rect x="5" y="2" width="2" height="1" fill="#e079fa"/>
+    <rect x="2" y="2" width="1" height="1" fill="#b23be0"/>
+    <rect x="5" y="2" width="1" height="1" fill="#b23be0"/>
+    <rect x="3" y="5" width="2" height="8" fill="#161616"/>
+    <rect x="1" y="5" width="1" height="10" fill="#161616"/>
+    <rect x="6" y="5" width="1" height="10" fill="#161616"/>
+    <rect x="3" y="13" width="1" height="11" fill="#161616"/>
+    <rect x="4" y="13" width="1" height="11" fill="#161616"/></svg>`;
+}
+
+function buildDecor() {
+  const d = document.getElementById("decor");
+  let html = "";
+  const el = (svg, style, op) => `<span class="d" style="${style};opacity:${op}">${svg}</span>`;
+
+  // night sky
+  html += el(moonSVG(), "top:36px;right:7%;width:42px;height:42px", .95);
+  [[6,5],[15,12],[27,4],[38,9],[52,6],[63,13],[74,3],[85,8],[93,15],[20,20],[58,22],[81,24]]
+    .forEach(([x,y]) => { html += `<span class="star" style="left:${x}%;top:${y}%;opacity:${y%2?0.5:0.75}"></span>`; });
+
+  // floating blocks in the margins
+  const blocks = [
+    ["grass",    "left:8%;top:9%",    30, .22],
+    ["log",      "right:11%;top:12%", 28, .22],
+    ["dirt",     "left:3%;top:26%",   34, .22],
+    ["stone",    "right:4%;top:22%",  30, .22],
+    ["gold",     "right:2%;top:33%",  28, .24],
+    ["redstone", "left:2%;top:38%",   30, .24],
+    ["ore",      "left:5%;top:48%",   28, .25],
+    ["tnt",      "right:5%;top:44%",  32, .22],
+    ["obsidian", "left:7%;top:58%",   28, .22],
+    ["log",      "right:2%;top:56%",  26, .20],
+    ["stone",    "left:2%;top:68%",   26, .20],
+    ["dirt",     "right:3%;top:64%",  30, .20],
+    ["grass",    "left:4%;top:82%",   30, .22],
+    ["ore",      "right:8%;top:80%",  26, .22],
+    ["stone",    "right:6%;top:90%",  24, .20]
+  ];
+  blocks.forEach(([k, pos, s, op]) => { html += el(blockSVG(k), pos + `;width:${s}px;height:${s}px`, op); });
+
+  // mobs standing on the grass
+  html += el(endermanSVG(),     "left:5%;bottom:44px;width:26px;height:78px", 1);
+  html += el(creeperBodySVG(),  "left:23%;bottom:44px;width:30px;height:64px", 1);
+  html += el(zombieBodySVG(),   "left:56%;bottom:44px;width:30px;height:68px", 1);
+  html += el(skeletonBodySVG(), "left:80%;bottom:44px;width:30px;height:68px", 1);
+
+  d.innerHTML = html;
+}
+buildDecor();
+
+/* ---------- storage adapter ---------- */
+async function sbFetch(path, opts = {}) {
+  const res = await fetch(CONFIG.url + "/rest/v1/" + path, {
+    ...opts,
+    headers: {
+      "apikey": CONFIG.key,
+      "Authorization": "Bearer " + CONFIG.key,
+      "Content-Type": "application/json",
+      "Prefer": "return=representation",
+      ...(opts.headers || {})
+    }
+  });
+  if (!res.ok) throw new Error("Supabase " + res.status + ": " + await res.text());
+  const txt = await res.text();
+  return txt ? JSON.parse(txt) : null;
+}
+
+const store = {
+  async load() {
+    if (CLOUD) return await sbFetch("hc_runs?select=*&order=attempt_number.asc") || [];
+    return JSON.parse(localStorage.getItem(LS_KEY) || "[]");
+  },
+  async insert(run) {
+    if (CLOUD) { await sbFetch("hc_runs", { method:"POST", body: JSON.stringify([run]) }); }
+    else { localStorage.setItem(LS_KEY, JSON.stringify(runs)); }
+  },
+  async update(run) {
+    if (CLOUD) {
+      const { id, ...patch } = run;
+      await sbFetch("hc_runs?id=eq." + id, { method:"PATCH", body: JSON.stringify(patch) });
+    } else { localStorage.setItem(LS_KEY, JSON.stringify(runs)); }
+  }
+};
+
+// debounced save for rapid taps; immediate save for session state
+function queueSave(run) {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try { await store.update(run); } catch (e) { showErr(e.message); }
+  }, 600);
+}
+async function saveNow(run) {
+  clearTimeout(saveTimer);
+  try { await store.update(run); } catch (e) { showErr(e.message); }
+}
+
+/* ---------- helpers ---------- */
+const uid = () => crypto.randomUUID();
+const nowISO = () => new Date().toISOString();
+const current = () => runs.find(r => r.status === "active") || null;
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function totalPlayMs(r) {
+  let ms = r.play_ms || 0;
+  if (r.session_started_at) ms += Date.now() - new Date(r.session_started_at);
+  return ms;
+}
+function fmtPlay(ms) {
+  const m = Math.floor(ms / 60000), h = Math.floor(m / 60);
+  if (h > 0) return h + "h " + (m % 60) + "m";
+  return m + "m";
+}
+function fmtLive(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h + ":" + String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
+}
+
+function newAttempt(n, template) {
+  return {
+    id: uid(),
+    attempt_number: n,
+    mc_day: 1,
+    play_ms: 0,
+    session_started_at: null,
+    started_at: nowISO(),
+    ended_at: null,
+    status: "active",
+    death_player: null,
+    death_cause: null,
+    death_note: null,
+    players: [...PLAYERS],
+    milestones: template.map(m => ({ label: m.label, done: false }))
+  };
+}
+
+function showErr(msg) {
+  const box = document.getElementById("errBox");
+  box.textContent = msg; box.style.display = "block";
+}
+function showWarn(msg) {
+  const box = document.getElementById("warnBox");
+  box.textContent = msg; box.style.display = "block";
+}
+
+/* ---------- actions ---------- */
+function toggleMilestone(i) {
+  const r = current(); if (!r) return;
+  r.milestones[i].done = !r.milestones[i].done;
+  render(); queueSave(r);
+}
+function removeMilestone(i) {
+  const r = current(); if (!r) return;
+  r.milestones.splice(i, 1);
+  render(); queueSave(r);
+}
+function addMilestone() {
+  const inp = document.getElementById("msNew");
+  const label = inp.value.trim();
+  if (!label) return;
+  const r = current(); if (!r) return;
+  r.milestones.push({ label, done: false });
+  inp.value = "";
+  render(); queueSave(r);
+}
+
+function bumpDay(delta) {
+  const r = current(); if (!r) return;
+  r.mc_day = Math.max(1, (r.mc_day || 1) + delta);
+  render(); queueSave(r);
+}
+function setDay() {
+  const r = current(); if (!r) return;
+  const v = prompt("Set MC day (use /time query day on the server):", r.mc_day || 1);
+  if (v === null) return;
+  const n = parseInt(v, 10);
+  if (isNaN(n) || n < 1) { alert("That's not a day number."); return; }
+  r.mc_day = n;
+  render(); queueSave(r);
+}
+
+function toggleSession() {
+  const r = current(); if (!r) return;
+  if (r.session_started_at) {
+    r.play_ms = (r.play_ms || 0) + (Date.now() - new Date(r.session_started_at));
+    r.session_started_at = null;
+  } else {
+    r.session_started_at = nowISO();
+  }
+  document.getElementById("warnBox").style.display = "none";
+  render(); saveNow(r);
+}
+function editPlaytime() {
+  const r = current(); if (!r) return;
+  if (r.session_started_at) { alert("End the session first, then correct the total."); return; }
+  const curMin = Math.round((r.play_ms || 0) / 60000);
+  const v = prompt("Set total playtime in minutes:", curMin);
+  if (v === null) return;
+  const n = parseInt(v, 10);
+  if (isNaN(n) || n < 0) { alert("Minutes. A number."); return; }
+  r.play_ms = n * 60000;
+  render(); saveNow(r);
+}
+
+function openDeath() { deathMode = true; deathPlayer = null; render(); }
+function cancelDeath() { deathMode = false; deathPlayer = null; render(); }
+function pickPlayer(name) { deathPlayer = name; render(); }
+
+async function confirmDeath() {
+  const r = current(); if (!r || !deathPlayer) return;
+  clearTimeout(saveTimer);
+  if (r.session_started_at) { // fold live session into total
+    r.play_ms = (r.play_ms || 0) + (Date.now() - new Date(r.session_started_at));
+    r.session_started_at = null;
+  }
+  r.status = "dead";
+  r.ended_at = nowISO();
+  r.death_player = deathPlayer;
+  r.death_cause = document.getElementById("dfCause").value.trim() || "unknown";
+  r.death_note = document.getElementById("dfNote").value.trim();
+  const next = newAttempt(r.attempt_number + 1, r.milestones);
+  runs.push(next);
+  deathMode = false; deathPlayer = null;
+  render();
+  try {
+    await store.update(r);
+    await store.insert(next);
+  } catch (e) { showErr(e.message); }
+}
+
+/* ---------- export / import ---------- */
+function exportData() {
+  const blob = new Blob([JSON.stringify(runs, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "hardcore-backup-" + new Date().toISOString().slice(0,10) + ".json";
+  a.click();
+}
+function importData() {
+  if (CLOUD) { alert("Import is for local mode. Cloud is the source of truth."); return; }
+  document.getElementById("importFile").click();
+}
+document.getElementById("importFile").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (!Array.isArray(data)) throw new Error("not an array");
+      if (!confirm("Replace all current data with " + data.length + " imported run(s)?")) return;
+      runs = data;
+      localStorage.setItem(LS_KEY, JSON.stringify(runs));
+      render();
+    } catch { alert("Could not read that file as a HARDCORE backup."); }
+  };
+  reader.readAsText(f);
+});
+
+/* ---------- render ---------- */
+function render() {
+  const dead = runs.filter(r => r.status === "dead");
+  document.getElementById("stAttempts").textContent = runs.length || "-";
+  document.getElementById("stLongest").textContent = runs.length ? Math.max(...runs.map(r => r.mc_day || 1)) : "-";
+  const best = runs.length ? Math.max(...runs.map(r => r.milestones.filter(m => m.done).length)) : null;
+  const denom = current() ? current().milestones.length : (runs[0] ? runs[0].milestones.length : 0);
+  document.getElementById("stBest").textContent = best === null ? "-" : best + "/" + denom;
+
+  const r = current();
+  const el = document.getElementById("currentRun");
+  if (!r) { el.innerHTML = ""; }
+  else {
+    const live = !!r.session_started_at;
+    const msRows = r.milestones.map((m, i) => `
+      <div class="ms-row">
+        <button class="btn ms-btn ${m.done ? "done" : ""}" onclick="toggleMilestone(${i})">
+          <span class="box">${m.done ? "&#10003;" : ""}</span>${esc(m.label)}
+        </button>
+        <button class="btn ms-x" onclick="removeMilestone(${i})">&times;</button>
+      </div>`).join("");
+
+    const deathForm = deathMode ? `
+      <div class="death-form">
+        <div class="df-label">who died</div>
+        <div class="df-players">
+          ${r.players.map(p => `<button class="btn ${deathPlayer === p ? "sel" : ""}" onclick="pickPlayer('${esc(p)}')">${esc(p)}</button>`).join("")}
+        </div>
+        <div class="df-label">cause of death</div>
+        <input id="dfCause" placeholder="creeper, lava, skill issue...">
+        <div class="df-label">last words</div>
+        <input id="dfNote" placeholder="optional">
+        <div class="df-actions">
+          <button class="df-confirm" ${deathPlayer ? "" : "disabled"} onclick="confirmDeath()">CONFIRM DEATH</button>
+          <button class="btn df-cancel" onclick="cancelDeath()">CANCEL</button>
+        </div>
+      </div>` : `
+      <button class="die" onclick="openDeath()">${creeperSVG()} RUN ENDED</button>`;
+
+    el.innerHTML = `
+      <div class="run panel">
+        <div class="hearts">${Array.from({length:10}, (_,i) => heartSVG(i === 9 ? "beat" : "")).join("")}</div>
+        <div class="run-head">
+          <div class="attempt px"><small>ATTEMPT</small>${String(r.attempt_number).padStart(2,"0")}</div>
+          <div class="alive">ALIVE<span class="since">since ${new Date(r.started_at).toLocaleDateString()}</span></div>
+        </div>
+        <div class="trk">
+          <span class="lbl">PLAYTIME</span>
+          <div class="ctr">
+            ${live
+              ? `<span class="live-time px" id="liveTime">${fmtLive(Date.now() - new Date(r.session_started_at))}</span>
+                 <button class="btn sess-btn live" onclick="toggleSession()">&#9632; END SESSION</button>`
+              : `<span class="num px" onclick="editPlaytime()">${fmtPlay(r.play_ms || 0)}</span>
+                 <button class="btn sess-btn" onclick="toggleSession()">&#9654; START SESSION</button>`}
+          </div>
+        </div>
+        <div class="trk">
+          <span class="lbl">MC DAY</span>
+          <div class="ctr">
+            <button class="btn" onclick="bumpDay(-1)">-</button>
+            <span class="num px" onclick="setDay()">${r.mc_day || 1}</span>
+            <button class="btn" onclick="bumpDay(1)">+</button>
+          </div>
+        </div>
+        <div class="players">${r.players.map(p => `<span class="chip">${esc(p)}</span>`).join("")}</div>
+        <div class="ms-head"><span>milestones</span><span>${r.milestones.filter(m=>m.done).length}/${r.milestones.length}</span></div>
+        ${msRows}
+        <div class="ms-add">
+          <input id="msNew" placeholder="add a milestone" onkeydown="if(event.key==='Enter')addMilestone()">
+          <button class="btn" onclick="addMilestone()">ADD</button>
+        </div>
+        ${deathForm}
+      </div>`;
+  }
+
+  const gy = document.getElementById("graveyard");
+  if (!dead.length) {
+    gy.innerHTML = `<div class="gy-empty">No deaths yet. They're waiting.</div>`;
+  } else {
+    gy.innerHTML = dead.slice().sort((a,b) => b.attempt_number - a.attempt_number).map(g => {
+      const done = g.milestones.filter(m => m.done).length;
+      const pct = g.milestones.length ? Math.round(done / g.milestones.length * 100) : 0;
+      return `
+      <div class="grave panel">
+        <div class="grave-top">
+          <div class="grave-attempt px">&#9760; ATTEMPT ${String(g.attempt_number).padStart(2,"0")}</div>
+          <div class="grave-meta">MC DAY ${g.mc_day || 1} &middot; ${fmtPlay(g.play_ms || 0)} played &middot; ${new Date(g.ended_at).toLocaleDateString()}</div>
+        </div>
+        <div class="grave-death"><b>${esc(g.death_player)}</b> &mdash; ${esc(g.death_cause)}</div>
+        ${g.death_note ? `<div class="grave-words">&ldquo;${esc(g.death_note)}&rdquo;</div>` : ""}
+        <div class="grave-prog">
+          <div class="xpbar"><div style="width:${pct}%"></div></div>
+          <span>${done}/${g.milestones.length} milestones</span>
+        </div>
+      </div>`;
+    }).join("");
+  }
+}
+
+// 1s ticker — updates the live session readout only, never re-renders
+setInterval(() => {
+  const r = current();
+  const span = document.getElementById("liveTime");
+  if (r && r.session_started_at && span) {
+    span.textContent = fmtLive(Date.now() - new Date(r.session_started_at));
+  }
+}, 1000);
+
+/* ---------- init ---------- */
+async function init() {
+  document.getElementById("modeBadge").textContent = CLOUD ? "CLOUD" : "LOCAL";
+  if (CLOUD) document.getElementById("modeBadge").classList.add("cloud");
+  if (CLOUD) document.getElementById("importBtn").style.display = "none";
+
+  try {
+    runs = await store.load();
+
+    // one-time migration: cloud empty, local history exists
+    if (CLOUD && runs.length === 0) {
+      const local = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
+      if (local.length && confirm("Found " + local.length + " local run(s) on this device. Migrate them to the cloud?")) {
+        for (const run of local) {
+          if (run.mc_day === undefined) run.mc_day = 1;
+          if (run.play_ms === undefined) run.play_ms = 0;
+          if (run.session_started_at === undefined) run.session_started_at = null;
+          delete run.seed; // column no longer exists in schema
+          await sbFetch("hc_runs", { method:"POST", body: JSON.stringify([run]) });
+        }
+        runs = await store.load();
+      }
+    }
+
+    if (!current()) {
+      const n = runs.length ? Math.max(...runs.map(r => r.attempt_number)) + 1 : 1;
+      const template = runs.length
+        ? runs.slice().sort((a,b) => a.attempt_number - b.attempt_number)[runs.length-1].milestones
+        : DEFAULT_MILESTONES.map(l => ({ label: l }));
+      const first = newAttempt(n, template);
+      runs.push(first);
+      await store.insert(first);
+    }
+
+    // forgotten-session guard: live session older than 8 hours
+    const r = current();
+    if (r && r.session_started_at) {
+      const hrs = (Date.now() - new Date(r.session_started_at)) / 3600000;
+      if (hrs >= 8) {
+        showWarn("Session has been live for " + Math.round(hrs) + "h — forgot to end it? Hit END SESSION, then tap the playtime total to correct it.");
+      }
+    }
+  } catch (e) {
+    showErr("Storage error: " + e.message);
+  }
+  render();
+}
+
+init();
+</script>
+</body>
+</html>
