@@ -2,7 +2,7 @@
 
 **Project:** HARDCORE — Minecraft hardcore run tracker (one death ends the run for everyone)
 **Players:** Kylan, Raiden, Ethan
-**Status:** Built (v3), NOT yet deployed. Deployment + verification are the active work items.
+**Status:** v3 deployed 2026-11-05 to GitHub Pages + Supabase (cloud mode). Verified; test data wiped.
 **Repo:** github.com/kylanjack/hardcore
 **Live URL:** kylanjack.github.io/hardcore/
 
@@ -94,9 +94,9 @@ Order matters: Supabase first so the app is cloud-native from commit one, nothin
 | # | Item | Owner | Status |
 |---|---|---|---|
 | 1 | Create `hc_runs` table in Soul Link Supabase project (SQL in file comment) | Claude | DONE 2026-11-05 (migration `create_hc_runs`, 3 policies verified) |
-| 2 | Create repo, deploy to GitHub Pages, paste CONFIG | Kylan / Claude Code | PENDING |
-| 3 | Run full verification checklist (§6), then wipe test data | Kylan | PENDING |
-| 4 | Mobile check: mob spacing + block density on real phone | Kylan | PENDING |
+| 2 | Create repo, deploy to GitHub Pages, paste CONFIG | Kylan + Claude | DONE 2026-11-05 |
+| 3 | Run full verification checklist (§6), then wipe test data | Claude | DONE 2026-11-05 except step 5 (real phone) |
+| 4 | Mobile check: mob spacing + block density on real phone | Kylan | 390px emulation OK; real phone pending |
 | 5 | PWA install support (manifest + apple-touch-icon) so it installs to iOS home screen like The Backlog | Claude Code | DEFERRED — V2 |
 | 6 | Supabase Realtime subscription so open devices update live without refresh | Claude Code | DEFERRED — V2 |
 | 7 | Per-player playtime | Kylan decision | DECIDED: no for V1 — shared group timer |
@@ -112,4 +112,4 @@ Known accepted risks (not open items): public anon key means writes are conventi
 | v1 | 2026-11-05 | Claude (chat) | Initial build: tracker core, dual-mode storage |
 | v2 | 2026-11-05 | Claude (chat) | MC retheme, seed removed, MC day counter |
 | v3 | 2026-11-05 | Claude (chat) | Session playtime, scenic background, footer line removed |
-| — | — | Claude Code | Deployment + verification (pending) |
+| v3 | 2026-11-05 | Claude (chat) | Deployed: hc_runs table, CONFIG filled, Pages live, §6 verified, test rows wiped |
